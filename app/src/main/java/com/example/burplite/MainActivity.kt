@@ -2,17 +2,18 @@ package com.example.burplte
 
 import android.content.Intent
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.runtime.Composable
-import androidx.compose.ui.Modifier
 import com.example.burplite.proxy.ProxyForegroundService
 import com.example.burplite.ui.BurpLiteApp
 import com.example.burplite.ui.ProxyViewModel
 import com.example.burplite.ui.theme.GlassColorScheme
 import java.io.File
+
+private const val TAG = "MainActivity"
 
 class MainActivity : ComponentActivity() {
 
@@ -21,20 +22,38 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        
+        Log.d(TAG, "MainActivity created")
 
-        // Start the proxy as a foreground service so it survives backgrounding
-        val intent = Intent(this, ProxyForegroundService::class.java)
-            .putExtra(ProxyForegroundService.EXTRA_PORT, proxyPort)
-        startForegroundService(intent)
-
-        // CertificateAuthority always writes to filesDir with this fixed name (see
-        // CertificateAuthority.kt), so we can resolve it directly without binding the service.
-        val caPath = File(filesDir, "burplte_root_ca.pem").absolutePath
-
-        setContent {
-            MaterialTheme(colorScheme = GlassColorScheme) {
-                BurpLiteApp(viewModel = viewModel, caCertPath = caPath)
-            }
+        try {
+            // Start the proxy as a foreground service so it survives backgrounding
+            val intent = Intent(this, ProxyForegroundService::class.java)
+                .putExtra(ProxyForegroundService.EXTRA_PORT, proxyPort)
+            
+            Log.d(TAG, "Starting foreground service on port $proxyPort")
+            startForegroundService(intent)
+            Log.d(TAG, "Foreground service started")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error starting foreground service", e)
         }
+
+        // CA certificate is saved in filesDir/ca.pem
+        val caPath = File(filesDir, "ca.pem").absolutePath
+
+        try {
+            setContent {
+                MaterialTheme(colorScheme = GlassColorScheme) {
+                    BurpLiteApp(viewModel = viewModel, caCertPath = caPath)
+                }
+            }
+            Log.d(TAG, "UI content set successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error setting content", e)
+        }
+    }
+
+    override fun onDestroy() {
+        Log.d(TAG, "MainActivity destroyed")
+        super.onDestroy()
     }
 }
