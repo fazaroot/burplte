@@ -29,6 +29,7 @@ import java.security.KeyPairGenerator
 import java.security.Security
 import java.security.cert.X509Certificate
 import java.util.*
+import java.util.concurrent.TimeUnit
 
 private const val TAG = "ProxyServer"
 
@@ -36,65 +37,123 @@ class ProxyServer(
     private val port: Int,
     private val caStorageDir: File
 ) {
-    private val bossGroup = NioEventLoopGroup()
+    private val bossGroup = NioEventLoopGroup(1)
     private val workerGroup = NioEventLoopGroup()
     private var serverChannel: Channel? = null
     private var caKeyPair: KeyPair? = null
     private var caCertificate: X509Certificate? = null
+    private var isStarted = false
 
     var rootCaPemPath: String? = null
         private set
 
     init {
         Security.addProvider(BouncyCastleProvider())
+        Log.d(TAG, "ProxyServer initialized for port $port")
     }
 
     fun start() {
-        try {
-            Log.d(TAG, "Starting proxy server on port $port")
+        synchronized(this) {
+            if (isStarted) {
+                Log.d(TAG, "Proxy already started")
+                return
+            }
             
-            // Initialize or load CA certificate
-            initializeCertificateAuthority()
-            
-            // Create server bootstrap
-            val bootstrap = ServerBootstrap()
-                .group(bossGroup, workerGroup)
-                .channel(NioServerSocketChannel::class.java)
-                .childHandler(object : ChannelInitializer<SocketChannel>() {
-                    override fun initChannel(ch: SocketChannel) {
-                        val pipeline = ch.pipeline()
-                        
-                        // Add HTTP codec
-                        pipeline.addLast("httpServerCodec", HttpServerCodec())
-                        pipeline.addLast("httpObjectAggregator", HttpObjectAggregator(65536))
-                        
-                        // Add traffic shaping for monitoring
-                        pipeline.addLast("trafficShaping", ChannelTrafficShapingHandler(0, 0))
-                        
-                        // Add proxy handler
-                        pipeline.addLast("proxyHandler", HttpProxyHandler(caCertificate, caKeyPair))
+            try {
+                Log.d(TAG, "Starting proxy server on port $port")
+                
+                // Initialize or load CA certificate
+                initializeCertificateAuthority()
+                
+                // Create server bootstrap
+                val bootstrap = ServerBootstrap()
+                    .group(bossGroup, workerGroup)
+                    .channel(NioServerSocketChannel::class.java)
+                    .childHandler(object : ChannelInitializer<SocketChannel>() {
+                        override fun initChannel(ch: SocketChannel) {
+                            try {
+                                val pipeline = ch.pipeline()
+                                
+                                // Add HTTP codec
+                                pipeline.addLast("httpServerCodec", HttpServerCodec())
+                                pipeline.addLast("httpObjectAggregator", HttpObjectAggregator(65536))
+                                
+                                // Add traffic shaping for monitoring
+                                pipeline.addLast("trafficShaping", ChannelTrafficShapingHandler(0, 0))
+                                
+                                // Add proxy handler
+                                pipeline.addLast("proxyHandler", HttpProxyHandler(caCertificate, caKeyPair))
+                                
+                                Log.d(TAG, "Channel pipeline configured")
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error initializing channel pipeline", e)
+                                ch.close()
+                            }
+                        }
+                    })
+                
+                // Bind to port
+                val channelFuture = bootstrap.bind("127.0.0.1", port)
+                channelFuture.addListener { future ->
+                    if (future.isSuccess) {
+                        Log.d(TAG, "Proxy server bound successfully on port $port")
+                    } else {
+                        Log.e(TAG, "Failed to bind proxy server", future.cause())
                     }
-                })
-            
-            // Bind to port
-            val channelFuture = bootstrap.bind("127.0.0.1", port)
-            serverChannel = channelFuture.sync().channel()
-            Log.d(TAG, "Proxy server started successfully on port $port")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start proxy server", e)
-            throw e
+                }
+                
+                serverChannel = channelFuture.sync().channel()
+                isStarted = true
+                Log.d(TAG, "Proxy server started successfully on port $port")
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to start proxy server", e)
+                isStarted = false
+                cleanup()
+                throw e
+            }
         }
     }
 
     fun stop() {
+        synchronized(this) {
+            if (!isStarted) {
+                Log.d(TAG, "Proxy not started")
+                return
+            }
+            
+            try {
+                Log.d(TAG, "Stopping proxy server")
+                cleanup()
+                isStarted = false
+                Log.d(TAG, "Proxy server stopped successfully")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error stopping proxy server", e)
+            }
+        }
+    }
+
+    private fun cleanup() {
         try {
-            Log.d(TAG, "Stopping proxy server")
             serverChannel?.close()?.sync()
-            workerGroup.shutdownGracefully()
-            bossGroup.shutdownGracefully()
-            Log.d(TAG, "Proxy server stopped")
         } catch (e: Exception) {
-            Log.e(TAG, "Error stopping proxy server", e)
+            Log.e(TAG, "Error closing server channel", e)
+        }
+        
+        try {
+            if (!workerGroup.isShutdown) {
+                workerGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error shutting down worker group", e)
+        }
+        
+        try {
+            if (!bossGroup.isShutdown) {
+                bossGroup.shutdownGracefully(0, 5, TimeUnit.SECONDS).sync()
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error shutting down boss group", e)
         }
     }
 
@@ -104,14 +163,13 @@ class ProxyServer(
             val caKeyFile = File(caStorageDir, "ca.key")
             
             if (caPemFile.exists() && caKeyFile.exists()) {
-                Log.d(TAG, "Loading existing CA certificate")
-                // In a production app, you would load the existing certificates
-                // For now, we'll regenerate them
-                generateCertificateAuthority(caPemFile)
-            } else {
-                Log.d(TAG, "Generating new CA certificate")
-                generateCertificateAuthority(caPemFile)
+                Log.d(TAG, "CA certificate files exist, regenerating...")
+                caPemFile.delete()
+                caKeyFile.delete()
             }
+            
+            Log.d(TAG, "Generating new CA certificate")
+            generateCertificateAuthority(caPemFile)
         } catch (e: Exception) {
             Log.e(TAG, "Error initializing certificate authority", e)
             throw e
@@ -127,6 +185,7 @@ class ProxyServer(
             val keyPairGen = KeyPairGenerator.getInstance("RSA")
             keyPairGen.initialize(2048)
             caKeyPair = keyPairGen.generateKeyPair()
+            Log.d(TAG, "RSA key pair generated")
             
             // Generate self-signed CA certificate
             val issuerName = X500Name("CN=BurpLite CA, O=BurpLite, L=Proxy, C=US")
@@ -161,6 +220,8 @@ class ProxyServer(
                 extUtils.createAuthorityKeyIdentifier(caKeyPair!!.public)
             )
             
+            Log.d(TAG, "Certificate extensions added")
+            
             // Sign certificate
             val signer = JcaContentSignerBuilder("SHA256WithRSAEncryption")
                 .setProvider(BouncyCastleProvider())
@@ -169,6 +230,8 @@ class ProxyServer(
             val certHolder: X509CertificateHolder = builder.build(signer)
             val converter = JcaX509CertificateConverter()
             caCertificate = converter.getCertificate(certHolder)
+            
+            Log.d(TAG, "Certificate signed and created")
             
             // Write CA certificate to PEM file
             writeCertificateToPem(caCertificate!!, caPemFile)
@@ -186,6 +249,7 @@ class ProxyServer(
             FileWriter(file).use { writer ->
                 PEMWriter(writer).use { pemWriter ->
                     pemWriter.writeObject(cert)
+                    Log.d(TAG, "Certificate written to PEM file")
                 }
             }
         } catch (e: IOException) {
