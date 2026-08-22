@@ -6,6 +6,8 @@ import org.bouncycastle.cert.X509v3CertificateBuilder
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
 import org.bouncycastle.cert.jcajce.JcaX509ExtensionUtils
 import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import io.netty.handler.ssl.SslContext
+import io.netty.handler.ssl.SslContextBuilder
 import java.io.File
 import java.math.BigInteger
 import java.security.*
@@ -45,6 +47,17 @@ class CertificateAuthority(private val storageDir: File) {
     /** Returns cert+key for [host], generating & caching if needed. */
     fun certFor(host: String): Pair<X509Certificate, PrivateKey> =
         leafCache.getOrPut(host) { generateLeafCert(host) }
+
+    // Netty server SslContext per host, built once and cached: minting the leaf
+    // keypair + signing is expensive (audit B5) — never do it inside an I/O loop.
+    private val sslCtxCache = ConcurrentHashMap<String, SslContext>()
+
+    /** Cached [SslContext] presenting our MITM leaf certificate for [host]. */
+    fun serverSslContextFor(host: String): SslContext =
+        sslCtxCache.getOrPut(host) {
+            val (leafCert, leafKey) = certFor(host)
+            SslContextBuilder.forServer(leafKey, leafCert, rootCert).build()
+        }
 
     // -------- root CA --------
 

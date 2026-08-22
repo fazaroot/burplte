@@ -1,4 +1,4 @@
-package com.example.burplite
+package com.example.burplte
 
 import android.content.Intent
 import android.os.Bundle
@@ -6,13 +6,12 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.viewModels
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.foundation.layout.fillMaxSize
 import com.example.burplite.proxy.ProxyForegroundService
 import com.example.burplite.ui.BurpLiteApp
 import com.example.burplite.ui.ProxyViewModel
+import com.example.burplite.ui.theme.GlassColorScheme
 import java.io.File
 
 class MainActivity : ComponentActivity() {
@@ -30,13 +29,11 @@ class MainActivity : ComponentActivity() {
 
         // CertificateAuthority always writes to filesDir with this fixed name (see
         // CertificateAuthority.kt), so we can resolve it directly without binding the service.
-        val caPath = File(filesDir, "burplite_root_ca.pem").absolutePath
+        val caPath = File(filesDir, "burplte_root_ca.pem").absolutePath
 
         setContent {
-            MaterialTheme {
-                Surface(modifier = Modifier.fillMaxSize()) {
-                    BurpLiteApp(viewModel = viewModel, caCertPath = caPath)
-                }
+            MaterialTheme(colorScheme = GlassColorScheme) {
+                BurpLiteApp(viewModel = viewModel, caCertPath = caPath)
             }
         }
     }

@@ -23,36 +23,40 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
     private val _transactions = MutableStateFlow<List<HttpTransaction>>(emptyList())
     val transactions: StateFlow<List<HttpTransaction>> = _transactions.asStateFlow()
 
-    /** The transaction currently awaiting user action in the intercept dialog, if any. */
-    private val _pending = MutableStateFlow<HttpTransaction?>(null)
-    val pending: StateFlow<HttpTransaction?> = _pending.asStateFlow()
+    /**
+     * QUEUE of requests currently paused for interception (audit B2: the old
+     * single-slot `_pending` overwrote waiting transactions so they could never
+     * be forwarded — a permanent worker-thread deadlock).
+     */
+    private val _pending = MutableStateFlow<List<HttpTransaction>>(emptyList())
+    val pending: StateFlow<List<HttpTransaction>> = _pending.asStateFlow()
 
-    private val _interceptEnabled = MutableStateFlow(true)
+    /** Audit B1: intercept OFF by default so browsing is never blocked. */
+    private val _interceptEnabled = MutableStateFlow(false)
     val interceptEnabled: StateFlow<Boolean> = _interceptEnabled.asStateFlow()
 
     private val _repeaterResult = MutableStateFlow<HttpResponseSnapshot?>(null)
     val repeaterResult: StateFlow<HttpResponseSnapshot?> = _repeaterResult.asStateFlow()
+
+    private val _repeaterSending = MutableStateFlow(false)
+    val repeaterSending: StateFlow<Boolean> = _repeaterSending.asStateFlow()
 
     private var historyLoaded = false
 
     init {
         InterceptStore.onNewTransaction { tx ->
             _transactions.value = InterceptStore.all()
-            if (InterceptStore.interceptEnabled) _pending.value = tx
+            if (InterceptStore.interceptEnabled) {
+                _pending.value = _pending.value + tx
+            }
         }
         InterceptStore.onTransactionComplete { tx ->
             _transactions.value = InterceptStore.all()
-            if (_pending.value?.id == tx.id) _pending.value = null
+            _pending.value = _pending.value.filter { it.id != tx.id }
             persist(tx)
         }
     }
 
-    /**
-     * Loads past sessions' traffic from Room into InterceptStore so the
-     * history list isn't empty after an app restart (the proxy service
-     * may keep running, but the in-memory InterceptStore is fresh each
-     * process start). Call once when the list screen first appears.
-     */
     fun loadHistory() {
         if (historyLoaded) return
         historyLoaded = true
@@ -79,21 +83,35 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
 
     fun forward(tx: HttpTransaction) {
         tx.forward()
-        _pending.value = null
+        _pending.value = _pending.value.filter { it.id != tx.id }
     }
 
     fun drop(tx: HttpTransaction) {
         tx.drop()
-        _pending.value = null
+        _pending.value = _pending.value.filter { it.id != tx.id }
+    }
+
+    fun forwardAll() {
+        _pending.value.forEach { it.forward() }
+        _pending.value = emptyList()
+    }
+
+    fun dropAll() {
+        _pending.value.forEach { it.drop() }
+        _pending.value = emptyList()
     }
 
     /** Repeater: resend an arbitrary edited request, outside the intercept flow. */
     fun repeaterSend(method: String, url: String, headers: Map<String, String>, body: String) {
+        if (_repeaterSending.value) return
+        _repeaterSending.value = true
         viewModelScope.launch(Dispatchers.IO) {
             try {
                 val conn = URL(url).openConnection() as HttpURLConnection
+                conn.connectTimeout = 10_000
+                conn.readTimeout = 30_000
                 conn.requestMethod = method
-                headers.forEach { (k, v) -> conn.setRequestProperty(k, v) }
+                headers.forEach { (k, v) -> if (!k.equals("Host", true)) conn.setRequestProperty(k, v) }
                 if (body.isNotEmpty()) {
                     conn.doOutput = true
                     conn.outputStream.write(body.toByteArray())
@@ -108,6 +126,8 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
                 _repeaterResult.value = HttpResponseSnapshot(
                     -1, emptyMap(), "Error: ${e.message}".toByteArray()
                 )
+            } finally {
+                _repeaterSending.value = false
             }
         }
     }
@@ -137,3 +157,4 @@ class ProxyViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 }
+

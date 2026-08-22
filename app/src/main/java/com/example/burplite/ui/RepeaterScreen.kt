@@ -1,21 +1,38 @@
 package com.example.burplite.ui
 
-import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.*
-import androidx.compose.runtime.*
+import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.unit.dp
 import com.example.burplite.model.HttpTransaction
+import com.example.burplite.ui.theme.glassCard
 
 /**
- * The Repeater: take any past transaction (or a blank template),
- * tweak payloads (e.g. inject ' OR '1'='1 into a param), and fire
- * repeatedly against the target — exactly the SQLi/XSS testing loop.
+ * The Repeater: take any past transaction (or a blank template), tweak
+ * payloads, and fire repeatedly against the target.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun RepeaterScreen(seed: HttpTransaction?, viewModel: ProxyViewModel) {
     var method by remember { mutableStateOf(seed?.request?.method ?: "GET") }
@@ -26,51 +43,72 @@ fun RepeaterScreen(seed: HttpTransaction?, viewModel: ProxyViewModel) {
         )
     }
     var bodyText by remember { mutableStateOf(seed?.request?.body?.let { String(it) } ?: "") }
+
     val result by viewModel.repeaterResult.collectAsState()
+    val sending by viewModel.repeaterSending.collectAsState()
 
-    Scaffold(topBar = { TopAppBar(title = { Text("Repeater") }) }) { padding ->
-        Column(
-            Modifier.padding(padding).padding(16.dp).verticalScroll(rememberScrollState()),
-            verticalArrangement = Arrangement.spacedBy(10.dp)
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(
-                    value = method, onValueChange = { method = it },
-                    label = { Text("Method") }, modifier = Modifier.width(110.dp)
-                )
-                OutlinedTextField(
-                    value = url, onValueChange = { url = it },
-                    label = { Text("URL") }, modifier = Modifier.weight(1f)
-                )
-            }
+    Column(
+        Modifier
+            .fillMaxSize()
+            .padding(horizontal = 14.dp)
+            .verticalScroll(rememberScrollState()),
+        verticalArrangement = Arrangement.spacedBy(10.dp)
+    ) {
+        Text(
+            "Repeater",
+            style = MaterialTheme.typography.titleLarge,
+            modifier = Modifier.padding(top = 14.dp)
+        )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             OutlinedTextField(
-                value = headersText, onValueChange = { headersText = it },
-                label = { Text("Headers (one per line)") },
-                textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 100.dp)
+                value = method, onValueChange = { method = it },
+                label = { Text("Method") }, modifier = Modifier.width(110.dp), singleLine = true
             )
             OutlinedTextField(
-                value = bodyText, onValueChange = { bodyText = it },
-                label = { Text("Body — edit your SQLi/XSS payload here") },
-                textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
-                modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp)
+                value = url, onValueChange = { url = it },
+                label = { Text("URL") }, modifier = Modifier.weight(1f), singleLine = true
             )
-            Button(onClick = {
-                val headersMap = headersText.lines().mapNotNull { line ->
-                    val idx = line.indexOf(':')
-                    if (idx == -1) null else line.substring(0, idx).trim() to line.substring(idx + 1).trim()
-                }.toMap()
-                viewModel.repeaterSend(method, url, headersMap, bodyText)
-            }) { Text("Send") }
+        }
+        OutlinedTextField(
+            value = headersText, onValueChange = { headersText = it },
+            label = { Text("Headers (one per line)") },
+            textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 90.dp)
+        )
+        OutlinedTextField(
+            value = bodyText, onValueChange = { bodyText = it },
+            label = { Text("Body — edit your payload here") },
+            textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+            modifier = Modifier.fillMaxWidth().heightIn(min = 120.dp)
+        )
+        Button(onClick = {
+            viewModel.repeaterSend(method, url, parseHeaders(headersText), bodyText)
+        }) {
+            Text(if (sending) "Sending…" else "Send")
+        }
+        if (sending) CircularProgressIndicator(Modifier.width(24.dp))
 
-            Divider(Modifier.padding(vertical = 8.dp))
-            Text("RESPONSE", style = MaterialTheme.typography.titleSmall)
-            result?.let { resp ->
-                Text("Status: ${resp.statusCode}", fontFamily = FontFamily.Monospace)
-                resp.headers.forEach { (k, v) -> Text("$k: $v", fontFamily = FontFamily.Monospace) }
-                Spacer(Modifier.height(8.dp))
-                Text(String(resp.body), fontFamily = FontFamily.Monospace)
-            }
+        result?.let { resp ->
+            Text(
+                "RESPONSE",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Text(
+                buildString {
+                    appendLine("Status: ${resp.statusCode}")
+                    resp.headers.forEach { (k, v) -> appendLine("$k: $v") }
+                    appendLine()
+                    append(String(resp.body).preview())
+                },
+                fontFamily = FontFamily.Monospace,
+                style = MaterialTheme.typography.bodySmall,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .glassCard()
+                    .padding(10.dp)
+            )
+            Spacer(Modifier.height(24.dp))
         }
     }
 }
