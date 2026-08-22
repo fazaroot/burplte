@@ -23,6 +23,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LocalTextStyle
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -258,7 +259,7 @@ private fun MonoBlock(label: String, text: () -> String) {
     )
 }
 
-private fun String.preview(): String =
+internal fun String.preview(): String =
     if (length > 20_000) "${take(20_000)}\n… (truncated)" else this
 
 internal fun hostOf(url: String): String =
