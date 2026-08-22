@@ -4,6 +4,7 @@ import com.example.burplite.cert.CertificateAuthority
 import com.example.burplite.model.EditableRequest
 import com.example.burplite.model.HttpResponseSnapshot
 import com.example.burplite.model.HttpTransaction
+import com.example.burplite.proxy.InterceptStore
 import io.netty.bootstrap.Bootstrap
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.Unpooled
@@ -279,14 +280,14 @@ private class ProxyFrontHandler(
             val handler = pooled.pipeline().get(RelayHandler::class.java)
             if (handler != null) {
                 handler.attach(job)
-                pooled.writeAndFlush(createRequest()).addListener { f ->
+                pooled.writeAndFlush(createRequest()).addListener(ChannelFutureListener { f ->
                     if (!f.isSuccess) {
                         handler.attach(null)
                         pool.evict(poolKey, pooled)
                         pooled.close()
                         connectNew(job, createRequest, poolKey, targetHost, targetPort, tx.isHttps)
                     }
-                }
+                })
                 return
             }
             pooled.close()
@@ -318,7 +319,7 @@ private class ProxyFrontHandler(
                     p.addLast(RelayHandler(poolKey, pool))
                 }
             })
-        bootstrap.connect(targetHost, targetPort).addListener { f ->
+        bootstrap.connect(targetHost, targetPort).addListener(ChannelFutureListener { f ->
             if (f.isSuccess) {
                 val ch = f.channel()
                 ch.pipeline().get(RelayHandler::class.java)?.attach(job)
@@ -326,7 +327,7 @@ private class ProxyFrontHandler(
             } else {
                 job.fail(null)
             }
-        }
+        })
     }
 
     private fun respondSimple(ctx: ChannelHandlerContext, status: HttpResponseStatus) {
