@@ -1,4 +1,4 @@
-package com.example.burplte
+package com.example.burplite
 
 import android.content.Intent
 import android.os.Bundle

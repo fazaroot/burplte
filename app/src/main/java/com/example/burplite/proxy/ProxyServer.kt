@@ -1,10 +1,9 @@
-package com.example.burplte.proxy
+package com.example.burplite.proxy
 
 import com.example.burplite.cert.CertificateAuthority
 import com.example.burplite.model.EditableRequest
 import com.example.burplite.model.HttpResponseSnapshot
 import com.example.burplite.model.HttpTransaction
-import com.example.burplite.proxy.InterceptStore
 import io.netty.bootstrap.Bootstrap
 import io.netty.bootstrap.ServerBootstrap
 import io.netty.buffer.Unpooled

@@ -7,7 +7,6 @@ import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import com.example.burplite.R
-import com.example.burplite.proxy.ProxyServer
 
 class ProxyForegroundService : Service() {
 
