@@ -38,7 +38,9 @@ android {
             "META-INF/INDEX.LIST",
             "META-INF/io.netty.versions.properties",
             "META-INF/DEPENDENCIES",
-            "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+            "META-INF/versions/9/OSGI-INF/MANIFEST.MF",
+            "META-INF/LICENSE",
+            "META-INF/NOTICE"
         )
     }
 }
@@ -62,11 +64,12 @@ dependencies {
     // Serialization (used for JSON-encoding headers in Room)
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.3")
 
-    // Proxy engine
+    // Proxy engine - Netty
     implementation("io.netty:netty-codec-http:4.1.111.Final")
     implementation("io.netty:netty-handler:4.1.111.Final")
     implementation("io.netty:netty-transport:4.1.111.Final")
     implementation("io.netty:netty-buffer:4.1.111.Final")
+    implementation("io.netty:netty-common:4.1.111.Final")
 
     // Certificate generation for on-the-fly MITM leaf certs
     implementation("org.bouncycastle:bcprov-jdk18on:1.78.1")
