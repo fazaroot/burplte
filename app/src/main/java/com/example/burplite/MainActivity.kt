@@ -37,8 +37,8 @@ class MainActivity : ComponentActivity() {
             Log.e(TAG, "Error starting foreground service", e)
         }
 
-        // CA certificate is saved in filesDir/ca.pem
-        val caPath = File(filesDir, "ca.pem").absolutePath
+        // CA certificate is saved by CertificateAuthority in filesDir
+        val caPath = File(filesDir, "burplite_root_ca.pem").absolutePath
 
         try {
             setContent {
