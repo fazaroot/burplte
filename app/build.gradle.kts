@@ -33,11 +33,12 @@ android {
     composeOptions { kotlinCompilerExtensionVersion = "1.5.14" }
 
     packaging {
-        // Netty ships some META-INF files that collide during merge
+        // Netty & BouncyCastle both ship META-INF files that collide during merge
         resources.excludes += setOf(
             "META-INF/INDEX.LIST",
             "META-INF/io.netty.versions.properties",
-            "META-INF/DEPENDENCIES"
+            "META-INF/DEPENDENCIES",
+            "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         )
     }
 }
