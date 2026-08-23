@@ -37,7 +37,7 @@ private data class TabSpec(val label: String, val icon: ImageVector)
 private val TABS = listOf(
     TabSpec("Traffic", Icons.Filled.ListAlt),
     TabSpec("Intercept", Icons.Filled.Bolt),
-    TabSpec("Rules", Icons.Filled.Shield),
+    TabSpec("Rules", Icons.Filled.Security),
     TabSpec("Repeater", Icons.Filled.Send)
 )
 
