@@ -73,11 +73,14 @@ class ProxyServer(
 
     private val pool = OriginConnectionPool()
     private var channel: Channel? = null
+    @Volatile private var _actualPort: Int = port
+    val actualPort: Int get() = _actualPort
 
     fun start() {
         val bootstrap = ServerBootstrap()
             .group(bossGroup, workerGroup)
             .channel(NioServerSocketChannel::class.java)
+            .option(ChannelOption.SO_REUSEADDR, java.lang.Boolean.TRUE)
             .childOption(ChannelOption.TCP_NODELAY, true)
             .childHandler(object : ChannelInitializer<SocketChannel>() {
                 override fun initChannel(ch: SocketChannel) {
@@ -88,7 +91,27 @@ class ProxyServer(
                         ProxyFrontHandler(ca, clientGroup, originSslCtx, pool, interceptExecutor))
                 }
             })
-        channel = bootstrap.bind(port).sync().channel()
+        // Retry a few ports so a stale listener from an earlier run can't kill
+        // the proxy silently (the service crash-loop was the real cause of
+        // "no request arrives at all" on re-install).
+        var lastError: Throwable? = null
+        for (p in port until port + 20) {
+            try {
+                channel = bootstrap.bind(p).sync().channel()
+                _actualPort = p
+                ProxyState.running = true
+                ProxyState.port = p
+                ProxyState.lastError = null
+                Log.i(TAG, "ProxyServer listening on 0.0.0.0:" + p + " ready")
+                return
+            } catch (e: Exception) {
+                lastError = e
+                Log.w(TAG, "port " + p + " not bindable: " + e.message)
+            }
+        }
+        ProxyState.running = false
+        ProxyState.lastError = lastError?.message ?: "all proxy ports unavailable"
+        throw lastError ?: RuntimeException("all proxy ports unavailable")
     }
 
     fun stop() {
@@ -128,6 +151,8 @@ private class ProxyFrontHandler(
     @Volatile private var awaitingUser = false
 
     override fun channelRead0(ctx: ChannelHandlerContext, req: FullHttpRequest) {
+        Log.d(TAG, "channelRead0 " + req.method().name() + " " + req.uri() +
+            " from " + ctx.channel().remoteAddress())
         if (req.method() == HttpMethod.CONNECT) {
             handleConnect(ctx, req)
         } else {
@@ -203,7 +228,8 @@ private class ProxyFrontHandler(
             ),
             isHttps = true
         )
-        tx.forward()
+        // Put the tunnel into the transactions map so it shows in HTTP History.
+        InterceptStore.submit(tx, pause = false)
         tx.response = HttpResponseSnapshot(
             200, linkedMapOf("X-BurpLite-Mode" to "tunnel"), ByteArray(0)
         )

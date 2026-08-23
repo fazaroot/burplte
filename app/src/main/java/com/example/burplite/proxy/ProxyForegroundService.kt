@@ -5,6 +5,7 @@ import android.content.Intent
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.util.Log
 import androidx.core.app.NotificationCompat
 import com.example.burplite.R
 
@@ -35,8 +36,32 @@ class ProxyForegroundService : Service() {
 
     private fun startProxy(port: Int) {
         if (isRunning) return
-        server = ProxyServer(port, caStorageDir = filesDir).also { it.start() }
-        isRunning = true
+        try {
+            server = ProxyServer(port, caStorageDir = filesDir).also { it.start() }
+            isRunning = true
+            ProxyState.running = true
+            ProxyState.lastError = null
+            notifyPort(server!!.actualPort)
+        } catch (e: Exception) {
+            // Surface, never crash-loop: a stale listener or port conflict must
+            // not kill the service silently (root cause of "no request at all").
+            Log.e(TAG, "Failed to start proxy", e)
+            ProxyState.running = false
+            ProxyState.port = -1
+            ProxyState.lastError = e.message
+            isRunning = false
+        }
+    }
+
+    private fun notifyPort(port: Int) {
+        try {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm?.notify(NOTIF_ID, buildNotification(port))
+        } catch (e: Exception) {
+            // Notification permission may be denied on Android 13+; the in-app
+            // indicator still shows the true state, so this is non-fatal.
+            Log.w(TAG, "notification failed (non-fatal): " + e.message)
+        }
     }
 
     fun rootCaPath(): String? = server?.rootCaPemPath
@@ -44,6 +69,8 @@ class ProxyForegroundService : Service() {
     override fun onDestroy() {
         server?.stop()
         isRunning = false
+        ProxyState.running = false
+        ProxyState.port = -1
         super.onDestroy()
     }
 

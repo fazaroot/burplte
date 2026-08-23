@@ -46,6 +46,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import com.example.burplite.proxy.ProxyState
+import kotlinx.coroutines.delay
 import com.example.burplite.model.HttpTransaction
 import com.example.burplite.ui.theme.glassCard
 import com.example.burplite.util.CertShare
@@ -89,6 +91,7 @@ fun TrafficListScreen(
                 fontWeight = FontWeight.Bold,
                 modifier = Modifier.weight(1f)
             )
+            ProxyStatusPill()
             IconButton(onClick = { caCertPath?.let { CertShare.shareRootCa(context, it) } }) {
                 Icon(
                     Icons.Filled.Key, contentDescription = "Share CA certificate",
@@ -146,6 +149,28 @@ fun TrafficListScreen(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun ProxyStatusPill(modifier: Modifier = Modifier) {
+    var port by remember { mutableStateOf(ProxyState.port) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            port = ProxyState.port
+            delay(800)
+        }
+    }
+    val on = ProxyState.running && port > 0
+    val color = if (on) Color(0xFF69F0AE) else Color(0xFFFF6E6E)
+    Row(modifier, verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(8.dp).clip(CircleShape).background(color))
+        Spacer(Modifier.width(6.dp))
+        Text(
+            if (on) "Proxy on :$port" else "Proxy off",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
