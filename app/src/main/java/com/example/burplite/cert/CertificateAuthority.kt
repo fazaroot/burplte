@@ -14,6 +14,7 @@ import java.security.*
 import java.security.cert.X509Certificate
 import java.util.*
 import java.util.concurrent.ConcurrentHashMap
+import javax.net.ssl.KeyManagerFactory
 
 /**
  * Generates a self-signed Root CA once (install this into Android's
