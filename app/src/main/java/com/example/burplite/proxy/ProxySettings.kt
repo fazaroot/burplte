@@ -43,6 +43,18 @@ object ProxySettings {
         }
     }
 
+    // ---- HTTPS handling mode ----
+
+    enum class HttpsMode {
+        /** Blind-tunnel CONNECT: no decryption, no certificate needed on device. */
+        TUNNEL,
+        /** Decrypt HTTPS (needs the CA trusted on device, or a custom PKCS#12). */
+        MITM
+    }
+
+    /** TUNNEL by default: browsing just works without installing any certificate. */
+    @Volatile var httpsMode: HttpsMode = HttpsMode.TUNNEL
+
     // ---- Block / Redirect rules ----
 
     enum class Action { BLOCK, REDIRECT }

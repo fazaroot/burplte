@@ -59,6 +59,39 @@ class CertificateAuthority(private val storageDir: File) {
             SslContextBuilder.forServer(leafKey, leafCert, rootCert).build()
         }
 
+    // ---- SandroProxy-style "drop your own certificate in the directory" ----
+
+    @Volatile private var cachedCustomCtx: SslContext? = null
+    private var customChecked = false
+    private val customLock = Any()
+
+    /**
+     * If the user placed a PKCS#12 file named <code>proxy.p12</code> inside
+     * [storageDir], it is loaded once and used for ALL MITM connections —
+     * no per-host generation, no need to install a CA on the device (the
+     * certificate just has to be one the client already trusts).
+     *
+     * @return the cached context, or null when no usable proxy.p12 exists.
+     */
+    fun customPkcs12Context(): SslContext? {
+        if (customChecked) return cachedCustomCtx
+        synchronized(customLock) {
+            if (customChecked) return cachedCustomCtx
+            val p12 = File(storageDir, "proxy.p12")
+            cachedCustomCtx = if (!p12.exists()) null else try {
+                val ks = KeyStore.getInstance("PKCS12")
+                p12.inputStream().use { ks.load(it, null) }
+                val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
+                kmf.init(ks, null)
+                SslContextBuilder.forServer(kmf).build()
+            } catch (e: Exception) {
+                null
+            }
+            customChecked = true
+            return cachedCustomCtx
+        }
+    }
+
     // -------- root CA --------
 
     private fun generateRootCa() {

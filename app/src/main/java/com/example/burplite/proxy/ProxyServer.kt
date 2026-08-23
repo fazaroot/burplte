@@ -1,11 +1,13 @@
 package com.example.burplite.proxy
 
+import android.util.Log
 import com.example.burplite.cert.CertificateAuthority
 import com.example.burplite.model.EditableRequest
 import com.example.burplite.model.HttpResponseSnapshot
 import com.example.burplite.model.HttpTransaction
 import io.netty.bootstrap.Bootstrap
 import io.netty.bootstrap.ServerBootstrap
+import io.netty.buffer.ByteBuf
 import io.netty.buffer.Unpooled
 import io.netty.channel.Channel
 import io.netty.channel.ChannelFutureListener
@@ -111,6 +113,7 @@ private const val ORIGIN_READ_IDLE_S = 30
 
 /** Client connection closed after this much total idle time. */
 private const val CLIENT_IDLE_TIMEOUT_S = 75
+private const val TAG = "ProxyServer"
 
 /** Handles the client-facing side of every connection. */
 private class ProxyFrontHandler(
@@ -148,19 +151,28 @@ private class ProxyFrontHandler(
     // ---- HTTPS: CONNECT + MITM ----
 
     private fun handleConnect(ctx: ChannelHandlerContext, req: FullHttpRequest) {
+        val hostPort = req.uri().substringAfter(":", "443")
         val host = req.uri().substringBefore(":")
+        val port = hostPort.toIntOrNull() ?: 443
+
+        if (ProxySettings.httpsMode == ProxySettings.HttpsMode.TUNNEL) {
+            startTunnel(ctx, host, port)
+            return
+        }
+
+        // MITM mode: answer 200, then hand over an SslContext backed by either
+        // a user-supplied proxy.p12 (SandroProxy-style) or our generated CA leaf.
         val ok = DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK)
         ctx.writeAndFlush(ok).addListener(ChannelFutureListener { future ->
             if (!future.isSuccess) return@ChannelFutureListener
             try {
-                // Minting a leaf cert (RSA-2048 keygen + signing) is expensive:
-                // do it on this worker executor, never on the I/O event loop (audit B5).
-                val sslCtx = ca.serverSslContextFor(host)
+                val sslCtx = ca.customPkcs12Context() ?: ca.serverSslContextFor(host)
                 // Pipeline mutations must be serialized with inbound I/O → event loop.
                 ctx.channel().eventLoop().execute {
                     val p = ctx.pipeline()
                     p.remove(HttpServerCodec::class.java)
                     p.remove(HttpObjectAggregator::class.java)
+                    p.remove(IdleStateHandler::class.java)
                     // The tunnel has its own handler; leaving the front handler in
                     // front of the new codec made it swallow decrypted requests.
                     p.remove(this@ProxyFrontHandler)
@@ -171,6 +183,61 @@ private class ProxyFrontHandler(
                 }
             } catch (e: Exception) {
                 ctx.close()
+            }
+        })
+    }
+
+    /**
+     * Blind HTTPS tunnel (default mode): the CONNECTed socket is piped
+     * byte-for-byte to the origin — no decryption, no certificate needed on
+     * the device. The tunnel is still recorded in HTTP History.
+     */
+    private fun startTunnel(ctx: ChannelHandlerContext, host: String, port: Int) {
+        // Record the CONNECT in history so tunnels are visible in the UI.
+        val tx = HttpTransaction(
+            request = EditableRequest(
+                method = "CONNECT",
+                url = "https://$host:$port/",
+                headers = linkedMapOf("Host" to host),
+                body = ByteArray(0)
+            ),
+            isHttps = true
+        )
+        tx.forward()
+        tx.response = HttpResponseSnapshot(
+            200, linkedMapOf("X-BurpLite-Mode" to "tunnel"), ByteArray(0)
+        )
+        InterceptStore.notifyComplete(tx)
+
+        val originRef = java.util.concurrent.atomic.AtomicReference<Channel?>(null)
+
+        val bootstrap = Bootstrap()
+            .group(clientGroup)
+            .channel(NioSocketChannel::class.java)
+            .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, CONNECT_TIMEOUT_MS)
+            .option(ChannelOption.TCP_NODELAY, true)
+            .handler(object : ChannelInitializer<SocketChannel>() {
+                override fun initChannel(ch: SocketChannel) {
+                    ch.pipeline().addLast(OriginToClientHandler(ctx))
+                }
+            })
+
+        bootstrap.connect(host, port).addListener(ChannelFutureListener { f ->
+            if (!f.isSuccess) {
+                respondBadRequest(ctx, "origin unreachable (CONNECT $host:$port)")
+                return@ChannelFutureListener
+            }
+            originRef.set(f.channel())
+            // Answer the CONNECT and swap to raw piping inside ONE event-loop
+            // task so no TLS bytes leak through before the pipe is live.
+            ctx.channel().eventLoop().execute {
+                ctx.writeAndFlush(DefaultFullHttpResponse(HttpVersion.HTTP_1_1, HttpResponseStatus.OK))
+                val p = ctx.pipeline()
+                p.remove(HttpServerCodec::class.java)
+                p.remove(HttpObjectAggregator::class.java)
+                p.remove(IdleStateHandler::class.java)
+                p.remove(this@ProxyFrontHandler)
+                p.addLast(ClientToOriginHandler(originRef))
             }
         })
     }
@@ -192,10 +259,35 @@ private class ProxyFrontHandler(
         val uri = try {
             URI(req.uri())
         } catch (e: Exception) {
-            respondSimple(ctx, HttpResponseStatus.BAD_REQUEST); return
+            logBadClientRequest(ctx, req, "malformed request-uri: ${e.message}")
+            respondBadRequest(ctx, "Malformed request URI")
+            return
         }
-        val host = uri.host ?: req.headers().get(HttpHeaderNames.HOST)?.substringBefore(":") ?: ""
+        // NOTE: CONNECT-tunneled requests can never reach here — the front
+        // handler is removed from the pipeline before any tunnel goes live.
+        var host = uri.host
+        if (host.isNullOrEmpty()) {
+            // Relative-form request (RFC 7230 §5.3.2 violation, but common for
+            // proxy-unaware clients like some WebView-based browsers).
+            host = req.headers().entries()
+                .firstOrNull { it.key.equals("Host", ignoreCase = true) }
+                ?.value?.trim()?.substringBefore(":")
+        }
+        if (host.isNullOrEmpty()) {
+            logBadClientRequest(ctx, req, "no host: relative-form URI and no Host header")
+            respondBadRequest(ctx, "Missing host — client sent a relative-form request without a Host header")
+            return
+        }
         forwardIntercepted(ctx, req, isHttps = false, host = host)
+    }
+
+    /** Dump the offending raw request to logcat so client bugs are debuggable. */
+    private fun logBadClientRequest(
+        ctx: ChannelHandlerContext, req: FullHttpRequest, reason: String
+    ) {
+        Log.w(TAG, "Unusable request ($reason) from ${ctx.channel().remoteAddress()}")
+        Log.w(TAG, "  request-line: ${req.method().name()} ${req.uri()} ${req.protocolVersion()}")
+        req.headers().forEach { (k, v) -> Log.w(TAG, "  $k: $v") }
     }
 
     // ---- shared: build transaction, pause for intercept, stream relay response ----
@@ -267,11 +359,11 @@ private class ProxyFrontHandler(
         clientKeepAlive: Boolean
     ) {
         val uri = try { URI(tx.request.url) } catch (e: Exception) {
-            respondSimple(ctx, HttpResponseStatus.BAD_REQUEST); return
+            respondBadRequest(ctx, "unroutable request"); return
         }
         val targetHost = uri.host
         if (targetHost.isNullOrEmpty()) {
-            respondSimple(ctx, HttpResponseStatus.BAD_REQUEST); return
+            respondBadRequest(ctx, "unroutable request"); return
         }
         val targetPort = if (uri.port != -1) uri.port else if (tx.isHttps) 443 else 80
         val poolKey = "$targetHost:$targetPort/${tx.isHttps}"
@@ -355,6 +447,19 @@ private class ProxyFrontHandler(
                 job.fail(null)
             }
         })
+    }
+
+    /** 400 with a visible diagnostic body so proxy errors differ from origin errors. */
+    private fun respondBadRequest(ctx: ChannelHandlerContext, reason: String) {
+        val body = ("BurpLite 400 Bad Request\n\n$reason\n\n" +
+            "See logcat tag $TAG for the raw request.").toByteArray()
+        val resp = DefaultFullHttpResponse(
+            HttpVersion.HTTP_1_1, HttpResponseStatus.BAD_REQUEST,
+            Unpooled.wrappedBuffer(body)
+        )
+        resp.headers().set(HttpHeaderNames.CONTENT_TYPE, "text/plain; charset=utf-8")
+        resp.headers().set(HttpHeaderNames.CONTENT_LENGTH, body.size)
+        ctx.writeAndFlush(resp)
     }
 
     private fun respondSimple(ctx: ChannelHandlerContext, status: HttpResponseStatus) {
@@ -625,6 +730,41 @@ private val HOP_BY_HOP = setOf(
 
 private fun isHopByHop(name: String): Boolean = name.lowercase() in HOP_BY_HOP
 
+/** Forwards raw bytes from the CLIENT side of a tunnel to the origin. */
+private class ClientToOriginHandler(
+    private val originRef: java.util.concurrent.atomic.AtomicReference<Channel?>
+) : SimpleChannelInboundHandler<ByteBuf>() {
+    override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteBuf) {
+        val origin = originRef.get()
+        if (origin != null && origin.isActive) {
+            origin.writeAndFlush(msg.retain())
+        } else {
+            ctx.close()
+        }
+    }
 
+    override fun exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
+        ctx.close()
+    }
 
+    override fun channelInactive(ctx: ChannelHandlerContext) {
+        originRef.get()?.close()
+    }
+}
 
+/** Forwards raw bytes from the ORIGIN of a tunnel back to the client. */
+private class OriginToClientHandler(
+    private val clientCtx: ChannelHandlerContext
+) : SimpleChannelInboundHandler<ByteBuf>() {
+    override fun channelRead0(ctx: ChannelHandlerContext, msg: ByteBuf) {
+        clientCtx.writeAndFlush(msg.retain())
+    }
+
+    override fun exceptionCaught(ctx: ChannelHandlerContext, cause: Throwable) {
+        ctx.close()
+    }
+
+    override fun channelInactive(ctx: ChannelHandlerContext) {
+        clientCtx.close()
+    }
+}
