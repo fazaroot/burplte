@@ -40,7 +40,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import com.example.burplite.model.HttpTransaction
 import com.example.burplite.ui.theme.glassCard
@@ -81,10 +84,14 @@ fun InterceptQueueScreen(viewModel: ProxyViewModel) {
 
         Spacer(Modifier.height(10.dp))
 
-        if (pending.isEmpty()) {
-            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+        val respPending by viewModel.pendingResponses.collectAsState()
+        var selectedRespId by remember { mutableStateOf<String?>(null) }
+        val currentResp = respPending.firstOrNull { it.id == selectedRespId } ?: respPending.firstOrNull()
+
+        if (pending.isEmpty() && respPending.isEmpty()) {
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
                 Text(
-                    "No requests waiting.\nTurn Intercept ON and browse a target.",
+                    "Nothing paused.\nTurn Intercept ON (set a filter in Rules tab), browse, then review here.",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     style = MaterialTheme.typography.bodyMedium
                 )
@@ -92,29 +99,55 @@ fun InterceptQueueScreen(viewModel: ProxyViewModel) {
             return
         }
 
-        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { viewModel.forwardAll() }) {
-                Text("Forward all (${pending.size})")
-            }
-            TextButton(onClick = { viewModel.dropAll() }) {
-                Text("Drop all")
-            }
-        }
-
-        // Queue selector — every paused request stays visible and selectable.
-        LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(pending, key = { it.id }) { p ->
-                FilterChip(
-                    selected = current?.id == p.id,
-                    onClick = { selectedId = p.id },
-                    label = { Text("${p.request.method.uppercase()} ${hostOf(p.request.url)}") }
+        if (pending.isNotEmpty()) {
+            Row(verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text(
+                    "Paused requests (${pending.size})",
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.weight(1f)
                 )
+                TextButton(onClick = { viewModel.forwardAll() }) { Text("Forward all") }
+                TextButton(onClick = { viewModel.dropAll() }) { Text("Drop all") }
+            }
+            // Queue selector — every paused request stays visible and selectable.
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(pending, key = { it.id }) { p ->
+                    FilterChip(
+                        selected = current?.id == p.id,
+                        onClick = { selectedId = p.id },
+                        label = { Text("${p.request.method.uppercase()} ${hostOf(p.request.url)}") }
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            current?.let { tx ->
+                InterceptEditorCard(tx = tx, viewModel = viewModel, modifier = Modifier.weight(1f))
             }
         }
-        Spacer(Modifier.height(8.dp))
 
-        current?.let { tx ->
-            InterceptEditorCard(tx = tx, viewModel = viewModel, modifier = Modifier.weight(1f))
+        if (respPending.isNotEmpty()) {
+            if (pending.isNotEmpty()) Spacer(Modifier.height(12.dp))
+            Text(
+                "Paused responses (${respPending.size})",
+                fontWeight = FontWeight.Bold
+            )
+            Spacer(Modifier.height(6.dp))
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                items(respPending, key = { it.id }) { r ->
+                    FilterChip(
+                        selected = currentResp?.id == r.id,
+                        onClick = { selectedRespId = r.id },
+                        label = {
+                            Text("${r.response?.statusCode ?: "?"} ${hostOf(r.request.url)}")
+                        }
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            currentResp?.let { tx ->
+                ResponseEditorCard(tx = tx, viewModel = viewModel, modifier = Modifier.weight(1f))
+            }
         }
     }
 }
@@ -180,10 +213,69 @@ private fun InterceptEditorCard(tx: HttpTransaction, viewModel: ProxyViewModel, 
     }
 }
 
+/** Edit a paused RESPONSE (status + body) before it is delivered to the client. */
+@Composable
+private fun ResponseEditorCard(tx: HttpTransaction, viewModel: ProxyViewModel, modifier: Modifier = Modifier) {
+    var statusText by remember(tx.id) {
+        mutableStateOf((tx.editedStatus ?: tx.response?.statusCode ?: 200).toString())
+    }
+    var bodyText by remember(tx.id) { mutableStateOf(String(tx.response?.body ?: ByteArray(0))) }
+
+    Column(modifier.fillMaxWidth()) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .weight(1f)
+                .glassCard()
+                .padding(12.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = statusText, onValueChange = { statusText = it },
+                    label = { Text("Status") },
+                    modifier = Modifier.width(110.dp), singleLine = true
+                )
+                OutlinedTextField(
+                    value = hostOf(tx.request.url), onValueChange = {},
+                    label = { Text("URL") }, readOnly = true,
+                    modifier = Modifier.weight(1f), singleLine = true
+                )
+            }
+            Text(
+                "Body — edit before it reaches the client",
+                style = MaterialTheme.typography.labelLarge
+            )
+            OutlinedTextField(
+                value = bodyText, onValueChange = { bodyText = it },
+                textStyle = LocalTextStyle.current.copy(fontFamily = FontFamily.Monospace),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 140.dp)
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            OutlinedButton(
+                onClick = { viewModel.rejectResponse(tx) },
+                modifier = Modifier.weight(1f)
+            ) { Text("Drop") }
+            Button(
+                onClick = {
+                    val st = statusText.trim().toIntOrNull()
+                        ?: tx.response?.statusCode ?: 200
+                    viewModel.approveResponseWithEdit(tx, st, bodyText)
+                },
+                modifier = Modifier.weight(1f)
+            ) { Text("Approve & Send") }
+        }
+    }
+}
+
 /** Read-only tabbed view for a completed transaction (tap from history list). */
 @Composable
 fun TransactionDetailScreen(tx: HttpTransaction, onClose: () -> Unit, onSendToRepeater: () -> Unit) {
     var tab by remember { mutableStateOf(0) }
+    val clipboard = LocalClipboardManager.current
 
     Column(Modifier.fillMaxSize()) {
         Row(
@@ -200,6 +292,9 @@ fun TransactionDetailScreen(tx: HttpTransaction, onClose: () -> Unit, onSendToRe
                 modifier = Modifier.weight(1f)
             )
             TextButton(onClick = onSendToRepeater) { Text("To Repeater") }
+            TextButton(onClick = {
+                clipboard.setText(AnnotatedString(buildCurl(tx)))
+            }) { Text("Copy cURL") }
         }
         TabRow(selectedTabIndex = tab) {
             Tab(selected = tab == 0, onClick = { tab = 0 }, text = { Text("Request") })
@@ -270,3 +365,17 @@ internal fun parseHeaders(text: String): Map<String, String> =
         val idx = line.indexOf(':')
         if (idx == -1) null else line.substring(0, idx).trim() to line.substring(idx + 1).trim()
     }.toMap()
+
+/** Export a transaction as a ready-to-run cURL command. */
+internal fun buildCurl(tx: HttpTransaction): String = buildString {
+    append("curl -k -X ").append(tx.request.method.uppercase())
+    append(" '").append(tx.request.url).append("'")
+    tx.request.headers.forEach { (k, v) ->
+        if (!k.equals("host", true) && !k.equals("content-length", true)) {
+            append(" -H '").append(k).append(": ").append(v.replace("'", "'\\''")).append("'")
+        }
+    }
+    if (tx.request.body.isNotEmpty()) {
+        append(" --data-raw '").append(String(tx.request.body).replace("'", "'\\''")).append("'")
+    }
+}

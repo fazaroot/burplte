@@ -82,7 +82,8 @@ class ProxyServer(
                     ch.pipeline().addLast(HttpServerCodec())
                     ch.pipeline().addLast(HttpObjectAggregator(MAX_RECORDED_BODY))
                     ch.pipeline().addLast(IdleStateHandler(0, 0, CLIENT_IDLE_TIMEOUT_S))
-                    ch.pipeline().addLast(interceptExecutor, ProxyFrontHandler(ca, clientGroup, originSslCtx, pool))
+                    ch.pipeline().addLast(interceptExecutor,
+                        ProxyFrontHandler(ca, clientGroup, originSslCtx, pool, interceptExecutor))
                 }
             })
         channel = bootstrap.bind(port).sync().channel()
@@ -116,7 +117,8 @@ private class ProxyFrontHandler(
     private val ca: CertificateAuthority,
     private val clientGroup: NioEventLoopGroup,
     private val originSslCtx: SslContext,
-    private val pool: OriginConnectionPool
+    private val pool: OriginConnectionPool,
+    private val uiExecutor: DefaultEventExecutorGroup
 ) : SimpleChannelInboundHandler<FullHttpRequest>() {
 
     /** True while this connection's thread is paused for user interception. */
@@ -217,11 +219,35 @@ private class ProxyFrontHandler(
         )
         val tx = HttpTransaction(request = editable, isHttps = isHttps)
 
-        // Blocks this worker (on interceptExecutor, not the I/O loop) until the
-        // user forwards/drops — or until InterceptStore's timeout auto-forwards.
-        awaitingUser = InterceptStore.interceptEnabled
+        // ---- Rule engine: block / redirect before anything else ----
+        when (val decision = ProxySettings.evaluate(fullUrl)) {
+            is ProxySettings.Decision.Block -> {
+                val bodyText = "Blocked by BurpLite rule".toByteArray()
+                val resp = DefaultFullHttpResponse(
+                    HttpVersion.HTTP_1_1, HttpResponseStatus.FORBIDDEN,
+                    Unpooled.wrappedBuffer(bodyText)
+                )
+                resp.headers().set(HttpHeaderNames.CONTENT_LENGTH, bodyText.size)
+                ctx.writeAndFlush(resp)
+                tx.response = HttpResponseSnapshot(403, emptyMap(), bodyText)
+                InterceptStore.notifyComplete(tx)
+                return
+            }
+            is ProxySettings.Decision.Redirect -> {
+                tx.request.url = decision.newUrl
+                val newHost = decision.newUrl.removePrefix("https://").removePrefix("http://")
+                    .substringBefore('/')
+                tx.request.headers["Host"] = newHost
+            }
+            ProxySettings.Decision.Pass -> {}
+        }
+
+        // ---- Granular interception: pause only when filter matches ----
+        val shouldPause = InterceptStore.interceptEnabled &&
+            ProxySettings.matchesFilter(fullUrl, req.method().name())
+        awaitingUser = shouldPause
         try {
-            InterceptStore.submit(tx)
+            InterceptStore.submit(tx, shouldPause)
         } finally {
             awaitingUser = false
         }
@@ -254,7 +280,9 @@ private class ProxyFrontHandler(
         val pathAndQuery = ((uri.rawPath?.ifEmpty { "/" }) ?: "/") +
             (uri.rawQuery?.let { "?$it" } ?: "")
 
-        val job = RelayJob(ctx, tx, clientKeepAlive, poolKey, pool)
+        val wantResponseIntercept = ProxySettings.responseInterceptEnabled &&
+            ProxySettings.matchesFilter(tx.request.url, tx.request.method)
+        val job = RelayJob(ctx, tx, clientKeepAlive, poolKey, pool, wantResponseIntercept, uiExecutor)
 
         // Lambda so we can build a fresh request object if a pooled write fails.
         val createRequest = {
@@ -346,7 +374,9 @@ private class RelayJob(
     private val tx: HttpTransaction,
     private val clientKeepAlive: Boolean,
     private val poolKey: String,
-    private val pool: OriginConnectionPool
+    private val pool: OriginConnectionPool,
+    private val interceptResponse: Boolean,
+    private val uiExecutor: DefaultEventExecutorGroup
 ) {
     private val recorded = ByteArrayOutputStream()
     private val respHeaders = LinkedHashMap<String, String>()
@@ -368,17 +398,19 @@ private class RelayJob(
         status = code
         serverKeepAlive = isServerKeepAlive(resp)
 
-        val out = DefaultHttpResponse(resp.protocolVersion(), resp.status())
         resp.headers().forEach { (k, v) ->
-            // Transfer-Encoding is deliberately KEPT: it defines the chunked
-            // framing we are relaying. Only true hop-by-hop headers are stripped.
-            if (!isHopByHop(k)) {
-                out.headers().add(k, v)
-                respHeaders[k] = v
-            }
+            if (!isHopByHop(k)) respHeaders[k] = v
         }
         val hasCL = resp.headers().contains(HttpHeaderNames.CONTENT_LENGTH)
         closeDelimited = !hasCL && !resp.headers().contains(HttpHeaderNames.TRANSFER_ENCODING)
+
+        if (interceptResponse) {
+            // Response interception: hold everything back until reviewed (buffered mode).
+            return
+        }
+
+        val out = DefaultHttpResponse(resp.protocolVersion(), resp.status())
+        respHeaders.forEach { (k, v) -> out.headers().add(k, v) }
         clientCtx.writeAndFlush(out)
     }
 
@@ -396,6 +428,11 @@ private class RelayJob(
         }
         // Stream straight through to the browser; retain because the handler
         // releases msg after channelRead0 returns.
+        if (interceptResponse) {
+            // Buffered interception mode: record only, forward nothing until reviewed.
+            if (content is LastHttpContent) settleIntercepted(originCtx)
+            return
+        }
         clientCtx.writeAndFlush(content.retain())
         if (content is LastHttpContent) settle(originCtx)
     }
@@ -455,6 +492,59 @@ private class RelayJob(
             resp.protocolVersion() == HttpVersion.HTTP_1_0 -> conn.contains("keep-alive")
             else -> true
         }
+    }
+
+    /**
+     * Response-intercepted completion: park the origin connection first (no
+     * thread may block on an event loop), then ask the UI to review/edit/drop
+     * the buffered response on the worker executor.
+     */
+    private fun settleIntercepted(originCtx: ChannelHandlerContext) {
+        if (settled) return
+        settled = true
+
+        tx.response = HttpResponseSnapshot(status, respHeaders, recorded.toByteArray())
+
+        originCtx.pipeline().get(RelayHandler::class.java)?.attach(null)
+        val ch = originCtx.channel()
+        if (serverKeepAlive && ch.isActive) pool.keep(poolKey, ch) else ch.close()
+
+        uiExecutor.execute {
+            try {
+                InterceptStore.submitResponseEdit(tx)
+            } catch (t: Throwable) {
+                tx.approveResponse()
+            }
+            deliverInterceptedResponse()
+        }
+    }
+
+    /** Sends the (possibly edited/dropped) response to the client after review. */
+    private fun deliverInterceptedResponse() {
+        if (tx.responseDropped) {
+            InterceptStore.notifyComplete(tx)
+            clientCtx.close()
+            return
+        }
+        val finalBody = tx.editedBody ?: recorded.toByteArray()
+        val finalStatus = tx.editedStatus ?: status
+        tx.response = HttpResponseSnapshot(finalStatus, respHeaders, finalBody)
+
+        val out = DefaultFullHttpResponse(
+            HttpVersion.HTTP_1_1, HttpResponseStatus.valueOf(finalStatus),
+            Unpooled.wrappedBuffer(finalBody)
+        )
+        respHeaders.forEach { (k, v) ->
+            // Framing headers are recomputed because body may have been edited.
+            if (!isHopByHop(k) &&
+                !k.equals(HttpHeaderNames.CONTENT_LENGTH.toString(), ignoreCase = true) &&
+                !k.equals(HttpHeaderNames.TRANSFER_ENCODING.toString(), ignoreCase = true)
+            ) out.headers().add(k, v)
+        }
+        out.headers().set(HttpHeaderNames.CONTENT_LENGTH, finalBody.size)
+        clientCtx.writeAndFlush(out)
+        if (!clientKeepAlive || tx.editedBody != null) clientCtx.close() else clientCtx.flush()
+        InterceptStore.notifyComplete(tx)
     }
 }
 

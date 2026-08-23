@@ -31,9 +31,15 @@ object InterceptStore {
     private val transactions = ConcurrentHashMap<String, HttpTransaction>()
     private val listeners = CopyOnWriteArrayList<(HttpTransaction) -> Unit>()
     private val completeListeners = CopyOnWriteArrayList<(HttpTransaction) -> Unit>()
+    private val responseListeners = CopyOnWriteArrayList<(HttpTransaction) -> Unit>()
 
     fun onNewTransaction(listener: (HttpTransaction) -> Unit) {
         listeners.add(listener)
+    }
+
+    /** Fired when a paused response awaits user review/edit. */
+    fun onResponsePending(listener: (HttpTransaction) -> Unit) {
+        responseListeners.add(listener)
     }
 
     /** Fired once a transaction's response has arrived (for persistence to Room, etc). */
@@ -50,18 +56,31 @@ object InterceptStore {
         transactions.putIfAbsent(tx.id, tx)
     }
 
-    fun submit(tx: HttpTransaction) {
+    fun submit(tx: HttpTransaction, pause: Boolean = interceptEnabled) {
         transactions[tx.id] = tx
         evictOldestSettledIfNeeded()
         listeners.forEach { it(tx) }
 
-        if (interceptEnabled) {
+        if (pause) {
             try {
                 tx.resumeSignal.get(interceptTimeoutMs, TimeUnit.MILLISECONDS)
             } catch (e: TimeoutException) {
                 // Auto-forward instead of blocking a worker thread forever.
                 tx.forward()
             }
+        }
+    }
+
+    /**
+     * Publish a paused RESPONSE for user review, then block until the UI
+     * approves/edits/drops it (with the same safety timeout as requests).
+     */
+    fun submitResponseEdit(tx: HttpTransaction) {
+        responseListeners.forEach { it(tx) }
+        try {
+            tx.responseSignal.get(interceptTimeoutMs, TimeUnit.MILLISECONDS)
+        } catch (e: TimeoutException) {
+            tx.approveResponse()
         }
     }
 

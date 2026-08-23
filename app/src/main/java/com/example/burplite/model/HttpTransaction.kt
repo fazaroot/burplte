@@ -37,4 +37,28 @@ class HttpTransaction(
 
     fun forward() = resumeSignal.complete(null)
     fun drop() { dropped = true; resumeSignal.complete(null) }
+
+    // ---- response interception (edit status/body before client receives) ----
+
+    /** True when the user chose to drop the response instead of forwarding it. */
+    @Volatile var responseDropped: Boolean = false
+
+    /** Completed by the UI when the paused response is approved/dropped/edited. */
+    val responseSignal: CompletableFuture<Void> = CompletableFuture()
+
+    @Volatile var editedStatus: Int? = null
+    @Volatile var editedBody: ByteArray? = null
+
+    fun approveResponse() = responseSignal.complete(null)
+
+    fun rejectResponse() {
+        responseDropped = true
+        responseSignal.complete(null)
+    }
+
+    fun approveResponseWithEdit(status: Int, body: ByteArray) {
+        editedStatus = status
+        editedBody = body
+        responseSignal.complete(null)
+    }
 }

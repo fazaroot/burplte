@@ -37,6 +37,7 @@ private data class TabSpec(val label: String, val icon: ImageVector)
 private val TABS = listOf(
     TabSpec("Traffic", Icons.Filled.ListAlt),
     TabSpec("Intercept", Icons.Filled.Bolt),
+    TabSpec("Rules", Icons.Filled.Shield),
     TabSpec("Repeater", Icons.Filled.Send)
 )
 
@@ -78,7 +79,8 @@ fun BurpLiteApp(viewModel: ProxyViewModel, caCertPath: String?) {
                         onOpenTransaction = { selected = it }
                     )
                     1 -> InterceptQueueScreen(viewModel = viewModel)
-                    2 -> RepeaterScreen(seed = selected, viewModel = viewModel)
+                    2 -> RulesScreen(viewModel = viewModel)
+                    3 -> RepeaterScreen(seed = selected, viewModel = viewModel)
                 }
             }
         }
